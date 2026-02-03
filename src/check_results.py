@@ -31,8 +31,10 @@ HEADERS = {
 def fetch_results_for_date(date_str: str) -> dict:
     """
     Fetch race results from Racing Post for a given date.
-    Returns dict of {(course, time): [(position, horse_name), ...]}
+    Returns dict of {(course, race_id): [(position, horse_name), ...]}
     """
+    import re as _re
+
     url = f'https://www.racingpost.com/results/{date_str}'
     results = {}
 
@@ -42,24 +44,26 @@ def fetch_results_for_date(date_str: str) -> dict:
             print(f"  Failed to fetch results for {date_str} (status {resp.status_code})")
             return results
 
-        doc = html.fromstring(resp.content)
+        # Extract all race result URLs from the page
+        pattern = r'/results/(\d+)/([^/]+)/' + date_str.replace('-', '-') + r'/(\d+)'
+        matches = _re.findall(pattern, resp.text)
 
-        for meeting in doc.xpath('//section[@data-accordion-row]'):
-            course_el = meeting.xpath(".//span[contains(@class, 'RC-accordion__courseName')]")
-            if not course_el:
-                continue
-            course = ' '.join(course_el[0].text_content().strip().split())
+        seen = set()
+        race_urls = []
+        for course_id, course_slug, race_id in matches:
+            if race_id not in seen:
+                seen.add(race_id)
+                course = course_slug.replace('-', ' ').title()
+                full_url = f'https://www.racingpost.com/results/{course_id}/{course_slug}/{date_str}/{race_id}'
+                race_urls.append((course, race_id, full_url))
 
-            for race_link in meeting.xpath(".//a[contains(@class, 'RC-meetingItem__link')]"):
-                race_id = race_link.attrib.get('data-race-id', '')
-                time_el = race_link.xpath(".//span[contains(@class, 'RC-meetingItem__timeText')]")
-                race_time = time_el[0].text_content().strip() if time_el else ''
+        print(f"  Found {len(race_urls)} races with results")
 
-                if race_id:
-                    # Fetch individual race result
-                    race_results = fetch_race_result(race_id)
-                    if race_results:
-                        results[(course, race_time)] = race_results
+        for course, race_id, race_url in race_urls:
+            race_results = fetch_race_result_html(race_url)
+            if race_results:
+                results[(course, race_id)] = race_results
+            time.sleep(0.3)
 
     except Exception as e:
         print(f"  Error fetching results page: {e}")
@@ -67,44 +71,38 @@ def fetch_results_for_date(date_str: str) -> dict:
     return results
 
 
-def fetch_race_result(race_id: str) -> list:
+def fetch_race_result_html(url: str) -> list:
     """
-    Fetch result for a specific race.
+    Fetch result for a specific race by parsing the result page HTML.
     Returns [(position, horse_name), ...]
     """
-    url = f'https://www.racingpost.com/results/data/{race_id}'
+    import re as _re
+
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            runners = []
-            for runner in data.get('runners', []):
-                pos = runner.get('position', '')
-                name = (runner.get('horseName') or '').strip()
-                if name:
-                    runners.append((pos, name))
-            return runners
-    except Exception:
-        pass
+        if resp.status_code != 200:
+            return []
 
-    # Fallback: try the card runners endpoint
-    url2 = f'https://www.racingpost.com/profile/horse/data/cardrunners/{race_id}.json'
-    try:
-        resp = requests.get(url2, headers=HEADERS, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            runners_map = data.get('runners', {})
-            runners = []
-            for r in runners_map.values():
-                pos = r.get('raceOutcomePosition', r.get('position', ''))
-                name = (r.get('horseName') or '').strip()
-                if name and pos:
-                    runners.append((pos, name))
-            return sorted(runners, key=lambda x: int(x[0]) if str(x[0]).isdigit() else 99)
-    except Exception:
-        pass
+        html_text = resp.text
 
-    return []
+        # Extract positions from data-test-selector="text-horsePosition"
+        pos_pattern = r'data-test-selector="text-horsePosition"\s*>\s*(\d+|PU|F|UR|RR|BD|RO|SU)\s*<'
+        positions = _re.findall(pos_pattern, html_text)
+
+        # Extract horse names from data-test-selector="link-horseName"
+        name_pattern = r'data-test-selector="link-horseName"\s*>\s*([^<]+?)\s*<'
+        names = _re.findall(name_pattern, html_text)
+
+        runners = []
+        for i, name in enumerate(names):
+            pos = positions[i] if i < len(positions) else '?'
+            runners.append((pos, name.strip()))
+
+        return runners
+
+    except Exception as e:
+        print(f"    Error fetching race result: {e}")
+        return []
 
 
 def update_bet_history(date_str: str = None):
@@ -152,17 +150,22 @@ def update_bet_history(date_str: str = None):
             stake = float(bet['stake'])
             decimal_odds = float(bet['decimal_odds'])
 
-            # Clean horse name for matching (remove region suffix)
+            # Skip doubles/accumulators - handle separately
+            if bet_type in ('Double', 'Treble', 'Accumulator'):
+                continue
+
+            # Clean horse name for matching (remove region suffix like "(FR)")
             horse_clean = horse.split(' (')[0].strip().lower()
 
             # Find matching result
             found = False
-            for (res_course, res_time), race_result in results.items():
-                if not res_course or not res_time:
+            for (res_course, res_race_id), race_result in results.items():
+                if not res_course:
                     continue
 
                 # Match course (fuzzy)
-                if course.lower() not in res_course.lower() and res_course.lower() not in course.lower():
+                course_lower = course.lower().split('(')[0].strip()
+                if course_lower not in res_course.lower() and res_course.lower() not in course_lower:
                     continue
 
                 for pos, res_horse in race_result:
@@ -224,6 +227,59 @@ def update_bet_history(date_str: str = None):
 
             if not found:
                 print(f"    ⏳ {horse} - No result found yet")
+
+        # Handle Doubles / Accumulators
+        multi_bets = df[(df['date'] == check_date) & (df['result'] == 'Pending') &
+                        (df['bet_type'].isin(['Double', 'Treble', 'Accumulator']))]
+
+        for idx, bet in multi_bets.iterrows():
+            horse_str = bet['horse']
+            stake = float(bet['stake'])
+            # Split legs: "Horse A + Horse B"
+            legs = [h.strip() for h in horse_str.split('+')]
+
+            all_won = True
+            any_lost = False
+            all_checked = True
+
+            for leg in legs:
+                leg_clean = leg.split('(')[0].strip().lower()
+                leg_found = False
+                leg_won = False
+
+                for (res_course, _), race_result in results.items():
+                    for pos, res_horse in race_result:
+                        res_clean = res_horse.split('(')[0].strip().lower()
+                        if leg_clean == res_clean or leg_clean in res_clean or res_clean in leg_clean:
+                            leg_found = True
+                            position = int(pos) if str(pos).isdigit() else 99
+                            if position == 1:
+                                leg_won = True
+                            else:
+                                any_lost = True
+                                all_won = False
+                            break
+                    if leg_found:
+                        break
+
+                if not leg_found:
+                    all_checked = False
+                    all_won = False
+
+            if any_lost:
+                df.loc[idx, 'result'] = 'Lost'
+                df.loc[idx, 'returns'] = 0
+                df.loc[idx, 'profit'] = -stake
+                print(f"    ❌ {horse_str} (Multi) - LOST")
+            elif all_won and all_checked:
+                returns = float(bet['potential_returns'])
+                profit = returns - stake
+                df.loc[idx, 'result'] = 'Won'
+                df.loc[idx, 'returns'] = round(returns, 2)
+                df.loc[idx, 'profit'] = round(profit, 2)
+                print(f"    ✅ {horse_str} (Multi) - WON! Returns £{returns:.2f}")
+            else:
+                print(f"    ⏳ {horse_str} (Multi) - Waiting for remaining legs")
 
     # Save updated history
     df.to_csv(history_path, index=False)
