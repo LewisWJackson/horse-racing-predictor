@@ -1191,102 +1191,156 @@ elif page == "📈 ELO Rankings":
 elif page == "📋 Bet Tracker":
     st.markdown('<h1 class="main-header">📋 Bet Tracker</h1>', unsafe_allow_html=True)
 
-    st.markdown("Track your bets and analyze your performance over time.")
+    st.markdown("Track your bets and monitor performance. Results update automatically.")
 
-    # Initialize bet history in session state
-    if 'bet_history' not in st.session_state:
-        st.session_state.bet_history = []
+    # Load bet history from CSV
+    bet_history_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'bet_history.csv')
+    if os.path.exists(bet_history_path):
+        history_df = pd.read_csv(bet_history_path)
+    else:
+        history_df = pd.DataFrame()
 
-    # Add new bet
-    st.subheader("➕ Add New Bet")
+    if len(history_df) > 0:
+        # Split into active/pending and settled
+        pending_df = history_df[history_df['result'] == 'Pending']
+        settled_df = history_df[history_df['result'] != 'Pending']
 
-    col1, col2, col3, col4 = st.columns(4)
+        # --- Overall Summary Metrics ---
+        st.subheader("📊 Performance Summary")
 
-    with col1:
-        bet_date = st.date_input("Date", datetime.now())
-        bet_horse = st.text_input("Horse/Selection")
-
-    with col2:
-        bet_type = st.selectbox("Bet Type", ["Win", "Place", "Each-Way", "Accumulator"])
-        bet_odds = st.number_input("Odds", min_value=1.01, value=3.0)
-
-    with col3:
-        bet_stake = st.number_input("Stake (£)", min_value=0.5, value=10.0)
-        bet_result = st.selectbox("Result", ["Pending", "Won", "Lost", "Void"])
-
-    with col4:
-        st.write("")
-        st.write("")
-        st.write("")
-        if st.button("Add Bet", use_container_width=True):
-            returns = bet_stake * bet_odds if bet_result == "Won" else (bet_stake if bet_result == "Void" else 0)
-            profit = returns - bet_stake if bet_result != "Pending" else 0
-
-            st.session_state.bet_history.append({
-                'date': bet_date,
-                'selection': bet_horse,
-                'type': bet_type,
-                'odds': bet_odds,
-                'stake': bet_stake,
-                'result': bet_result,
-                'returns': returns,
-                'profit': profit
-            })
-            st.success("Bet added!")
-
-    st.markdown("---")
-
-    # Display bet history
-    if st.session_state.bet_history:
-        st.subheader("📊 Bet History")
-
-        history_df = pd.DataFrame(st.session_state.bet_history)
-
-        # Summary stats
-        col1, col2, col3, col4 = st.columns(4)
-
-        total_staked = history_df['stake'].sum()
-        total_returns = history_df['returns'].sum()
-        total_profit = history_df['profit'].sum()
+        total_staked = float(history_df['stake'].sum())
+        total_returns = float(history_df['returns'].sum())
+        total_profit = float(history_df['profit'].sum())
         roi = (total_profit / total_staked * 100) if total_staked > 0 else 0
 
-        settled = history_df[history_df['result'] != 'Pending']
-        win_rate = (len(settled[settled['result'] == 'Won']) / len(settled) * 100) if len(settled) > 0 else 0
+        settled_count = len(settled_df)
+        wins = len(settled_df[settled_df['result'] == 'Won']) if settled_count > 0 else 0
+        places = len(settled_df[settled_df['result'] == 'Placed']) if settled_count > 0 else 0
+        losses = len(settled_df[settled_df['result'] == 'Lost']) if settled_count > 0 else 0
+        win_rate = (wins / settled_count * 100) if settled_count > 0 else 0
+        itm_rate = ((wins + places) / settled_count * 100) if settled_count > 0 else 0
 
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("Total Staked", f"£{total_staked:.2f}")
-
         with col2:
             st.metric("Total Returns", f"£{total_returns:.2f}")
-
         with col3:
-            st.metric("Profit/Loss", f"£{total_profit:.2f}", delta=f"{roi:.1f}% ROI")
-
+            profit_color = "normal" if total_profit >= 0 else "inverse"
+            st.metric("Profit/Loss", f"£{total_profit:+.2f}", delta=f"{roi:+.1f}% ROI")
         with col4:
-            st.metric("Win Rate", f"{win_rate:.1f}%")
+            st.metric("Win Rate", f"{win_rate:.0f}%", delta=f"{wins}W / {losses}L")
+        with col5:
+            st.metric("Pending Bets", f"{len(pending_df)}")
 
         st.markdown("---")
 
-        # Profit chart
-        if len(history_df) > 1:
-            history_df['cumulative_profit'] = history_df['profit'].cumsum()
-            fig = px.line(history_df, x=range(len(history_df)), y='cumulative_profit',
-                         title='Cumulative Profit Over Time')
-            fig.add_hline(y=0, line_dash="dash", line_color="red")
+        # --- Active / Pending Bets ---
+        if len(pending_df) > 0:
+            st.subheader("⏳ Active Bets")
+
+            for _, bet in pending_df.iterrows():
+                bet_type_badge = bet['bet_type']
+                odds_display = bet['odds'] if bet['odds'] != 'SP' else 'SP'
+                potential = f"£{float(bet['potential_returns']):.2f}" if float(bet['potential_returns']) > 0 else 'TBC'
+
+                col1, col2, col3, col4, col5 = st.columns([3, 2, 1.5, 1.5, 1.5])
+                with col1:
+                    st.markdown(f"**🏇 {bet['horse']}**")
+                with col2:
+                    st.markdown(f"📍 {bet['course']} · {bet['time']}")
+                with col3:
+                    st.markdown(f"🎯 {bet_type_badge} @ **{odds_display}**")
+                with col4:
+                    st.markdown(f"💷 £{float(bet['stake']):.2f}")
+                with col5:
+                    st.markdown(f"🎰 Potential: **{potential}**")
+
+            total_pending_stake = float(pending_df['stake'].sum())
+            total_potential = float(pending_df['potential_returns'].sum())
+            st.info(f"💰 **{len(pending_df)} active bets** · £{total_pending_stake:.2f} at risk · Up to £{total_potential:.2f} potential returns")
+
+        st.markdown("---")
+
+        # --- Settled Bets ---
+        if len(settled_df) > 0:
+            st.subheader("✅ Settled Bets")
+
+            for _, bet in settled_df.iterrows():
+                result = bet['result']
+                profit = float(bet['profit'])
+                position = bet.get('position', '')
+
+                if result == 'Won':
+                    icon = "✅"
+                    result_text = f"**WON** (1st) · +£{profit:.2f}"
+                elif result == 'Placed':
+                    icon = "🥉"
+                    pos_str = f"{int(position)}" if pd.notna(position) and str(position).replace('.','').isdigit() else ''
+                    result_text = f"**PLACED** ({pos_str}) · £{profit:+.2f}"
+                else:
+                    icon = "❌"
+                    pos_str = f"{int(position)}" if pd.notna(position) and str(position).replace('.','').isdigit() else ''
+                    pos_display = f" (Finished {pos_str})" if pos_str else ""
+                    result_text = f"**LOST**{pos_display} · -£{abs(profit):.2f}"
+
+                col1, col2, col3, col4 = st.columns([3, 2.5, 2, 2])
+                with col1:
+                    st.markdown(f"{icon} **{bet['horse']}**")
+                with col2:
+                    st.markdown(f"📍 {bet['course']} · {bet['time']}")
+                with col3:
+                    st.markdown(f"🎯 {bet['bet_type']} @ {bet['odds']}")
+                with col4:
+                    st.markdown(result_text)
+
+        st.markdown("---")
+
+        # --- Cumulative Profit Chart ---
+        settled_for_chart = history_df[history_df['result'] != 'Pending'].copy()
+        if len(settled_for_chart) > 1:
+            st.subheader("📈 Profit Over Time")
+            settled_for_chart = settled_for_chart.reset_index(drop=True)
+            settled_for_chart['cumulative_profit'] = settled_for_chart['profit'].astype(float).cumsum()
+            settled_for_chart['bet_num'] = range(1, len(settled_for_chart) + 1)
+            settled_for_chart['label'] = settled_for_chart['horse'].str.split(' \\(').str[0]
+
+            fig = px.line(settled_for_chart, x='bet_num', y='cumulative_profit',
+                         title='Cumulative Profit (Settled Bets)',
+                         labels={'bet_num': 'Bet Number', 'cumulative_profit': 'Cumulative P&L (£)'},
+                         hover_data=['label', 'profit'])
+            fig.add_hline(y=0, line_dash="dash", line_color="red", opacity=0.5)
+            fig.update_traces(line_color='#1a472a', line_width=3)
+            fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+            )
             st.plotly_chart(fig, use_container_width=True)
 
-        # Bet table
+        # --- Full Bet Table ---
+        st.subheader("📋 All Bets")
+
+        display_df = history_df[['date', 'horse', 'course', 'time', 'bet_type', 'odds', 'stake', 'potential_returns', 'result', 'position', 'returns', 'profit']].copy()
+        display_df.columns = ['Date', 'Horse', 'Course', 'Time', 'Type', 'Odds', 'Stake', 'Pot. Returns', 'Result', 'Pos', 'Returns', 'Profit']
+
+        # Color code results
+        def style_result(val):
+            if val == 'Won':
+                return 'background-color: #d4edda; color: #155724'
+            elif val == 'Placed':
+                return 'background-color: #fff3cd; color: #856404'
+            elif val == 'Lost':
+                return 'background-color: #f8d7da; color: #721c24'
+            return ''
+
         st.dataframe(
-            history_df[['date', 'selection', 'type', 'odds', 'stake', 'result', 'profit']],
+            display_df.style.applymap(style_result, subset=['Result']),
             use_container_width=True,
             hide_index=True
         )
 
-        if st.button("🗑️ Clear History"):
-            st.session_state.bet_history = []
-            st.rerun()
     else:
-        st.info("No bets recorded yet. Add your first bet above!")
+        st.info("No bets recorded yet. Bets will appear here once you start tracking.")
 
 
 elif page == "⚙️ Settings":
