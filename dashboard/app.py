@@ -264,33 +264,46 @@ def generate_todays_picks(upcoming_df: pd.DataFrame, elo_data: dict) -> dict:
 
         race_id = f"{date}_{course}_{time}"
 
-        # Calculate predictions for each horse
+        # First pass: collect ELO data for all runners in the race
+        race_runners = []
         for _, row in race.iterrows():
-            # Get odds (already numeric in upcoming_races)
             odds = float(row.get('odds', 20))
-            if odds < 1.5 or odds > 100:
-                continue
+            if odds < 1.1:
+                odds = 1.5
 
-            # Get ELO ratings (use stored values or lookup)
             h_elo = row.get('horse_elo', horse_elo.get(row['horse'], 1500))
             j_elo = row.get('jockey_elo', jockey_elo.get(row.get('jockey', ''), 1500))
             t_elo = row.get('trainer_elo', trainer_elo.get(row.get('trainer', ''), 1500))
-
-            # Composite score (higher = better prediction)
             composite_elo = h_elo * 0.5 + j_elo * 0.3 + t_elo * 0.2
 
-            # Model probability estimate (using ELO + odds combination)
-            implied_prob = 1 / odds
-            elo_factor = (composite_elo - 1500) / 200  # Normalize ELO bonus
-            model_prob = min(0.85, max(0.02, implied_prob * (1 + elo_factor * 0.3)))
+            race_runners.append({
+                'row': row,
+                'odds': odds,
+                'h_elo': h_elo,
+                'j_elo': j_elo,
+                't_elo': t_elo,
+                'composite_elo': composite_elo
+            })
 
-            # Calculate value edge
+        if len(race_runners) < 2:
+            continue
+
+        # Second pass: calculate normalised probabilities across the field
+        import numpy as np_local
+        elos = np_local.array([r['composite_elo'] for r in race_runners])
+        elo_centered = elos - np_local.mean(elos)
+        exp_elos = np_local.exp(elo_centered / 100)
+        model_probs = exp_elos / exp_elos.sum()
+
+        for i, rr in enumerate(race_runners):
+            row = rr['row']
+            odds = rr['odds']
+            implied_prob = 1 / odds
+            model_prob = float(model_probs[i])
+            top3_prob = min(0.92, model_prob * 2.5)
             value_edge = model_prob - implied_prob
 
-            # Top 3 probability (roughly 2.5x win prob, capped)
-            top3_prob = min(0.92, model_prob * 2.5)
-
-            if value_edge > 0.03:  # Only picks with 3%+ edge
+            if value_edge > 0.02:  # Only picks with 2%+ edge
                 all_picks.append({
                     'race_id': race_id,
                     'date': race_info['date'],
@@ -308,10 +321,10 @@ def generate_todays_picks(upcoming_df: pd.DataFrame, elo_data: dict) -> dict:
                     'model_prob': model_prob,
                     'top3_prob': top3_prob,
                     'value_edge': value_edge,
-                    'horse_elo': h_elo,
-                    'jockey_elo': j_elo,
-                    'trainer_elo': t_elo,
-                    'composite_elo': composite_elo,
+                    'horse_elo': rr['h_elo'],
+                    'jockey_elo': rr['j_elo'],
+                    'trainer_elo': rr['t_elo'],
+                    'composite_elo': rr['composite_elo'],
                     'kelly_stake': kelly_criterion(model_prob, odds)
                 })
 
@@ -618,24 +631,34 @@ elif page == "🎯 Race Predictions":
             # Display runners with predictions
             st.subheader("🏇 Runners & Model Predictions")
 
-            # Process runners with ELO-based predictions
-            runners = []
+            # Process runners with ELO-based predictions (normalised across the field)
+            race_elos = []
+            race_odds_list = []
             for _, row in race_data.iterrows():
-                # Get odds directly (already numeric in upcoming data)
                 odds = float(row.get('odds', 20))
-                implied_prob = calculate_implied_probability(odds)
-
-                # Get ELO ratings for this horse/jockey/trainer
+                if odds < 1.1:
+                    odds = 1.5
                 h_elo = horse_elo.get(row['horse'], 1500)
                 j_elo = jockey_elo.get(row.get('jockey', ''), 1500)
                 t_elo = trainer_elo.get(row.get('trainer', ''), 1500)
                 composite_elo = h_elo * 0.5 + j_elo * 0.3 + t_elo * 0.2
+                race_elos.append(composite_elo)
+                race_odds_list.append(odds)
 
-                # Model probability based on ELO + odds
-                elo_factor = (composite_elo - 1500) / 200
-                model_prob = min(0.85, max(0.02, implied_prob * (1 + elo_factor * 0.3)))
+            # Normalised probabilities via softmax on ELO
+            elos_arr = np.array(race_elos)
+            elo_centered = elos_arr - np.mean(elos_arr)
+            exp_elos = np.exp(elo_centered / 100)
+            model_probs = exp_elos / exp_elos.sum()
+
+            runners = []
+            for idx, (_, row) in enumerate(race_data.iterrows()):
+                odds = race_odds_list[idx]
+                implied_prob = calculate_implied_probability(odds)
+                model_prob = float(model_probs[idx])
                 top3_prob = min(0.92, model_prob * 2.5)
                 value_edge = model_prob - implied_prob
+                composite_elo = race_elos[idx]
                 kelly = kelly_criterion(model_prob, odds)
 
                 # Determine recommendation
